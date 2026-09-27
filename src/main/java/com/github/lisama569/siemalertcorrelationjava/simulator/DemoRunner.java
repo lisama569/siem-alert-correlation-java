@@ -61,6 +61,12 @@ public class DemoRunner implements CommandLineRunner {
                 "2026-09-24T08:00:50Z", Map.of("user", "alice"))); // 非法类型
         stream.add(new RawEvent("", "auth-gateway", "LOGIN_FAILED",
                 "2026-09-24T08:00:55Z", Map.of("user", "alice"))); // 缺 eventId
+        stream.add(new RawEvent("e7", "random-syslog", "LOGIN_FAILED",
+                "2026-09-24T08:00:56Z", Map.of("user", "alice"))); // 未认可来源
+        stream.add(new RawEvent("e8", "auth-gateway", "LOGIN_FAILED",
+                "2099-01-01T00:00:00Z", Map.of("user", "alice"))); // 来自未来的时间戳
+        stream.add(new RawEvent("e9", "auth-gateway", "NETWORK_CONNECTION",
+                "2026-09-24T08:00:57Z", Map.of("srcIp", "999.1.2.3"))); // 非法网络地址
 
         log.info("==== 1. 接入与归一化 ====");
         List<com.github.lisama569.siemalertcorrelationjava.model.SecurityEvent> accepted = new ArrayList<>();
