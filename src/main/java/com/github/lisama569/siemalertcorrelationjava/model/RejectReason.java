@@ -4,9 +4,11 @@ package com.github.lisama569.siemalertcorrelationjava.model;
 public enum RejectReason {
     MISSING_EVENT_ID,
     MISSING_SOURCE,
+    UNKNOWN_SOURCE,
     MISSING_TYPE,
     UNKNOWN_EVENT_TYPE,
     MISSING_OCCURRED_AT,
     INVALID_TIMESTAMP,
+    FUTURE_TIMESTAMP,
     INVALID_FIELD_VALUE
 }
