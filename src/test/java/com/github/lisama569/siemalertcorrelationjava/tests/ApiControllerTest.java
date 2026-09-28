@@ -64,7 +64,7 @@ class ApiControllerTest {
         assertRejected(eventJson("api-e3", "firewall", "LOGIN_FAILED",
                 "2999-01-01T00:00:00Z", "{}"), "FUTURE_TIMESTAMP");
         assertRejected(eventJson("api-e4", "firewall", "NETWORK_CONNECTION",
-                "2026-09-24T08:00:00Z", "{\"srcIp\":\"999.1.1.1\"}"), "INVALID_FIELD_VALUE");
+                "2026-09-24T08:00:00Z", "{\"srcIp\":\"999.1.1.1\"}"), "INVALID_IP_ADDRESS");
         assertRejected(eventJson("api-e5", "firewall", "NOPE",
                 "2026-09-24T08:00:00Z", "{}"), "UNKNOWN_EVENT_TYPE");
     }

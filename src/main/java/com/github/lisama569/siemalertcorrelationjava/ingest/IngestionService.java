@@ -8,9 +8,11 @@ import com.github.lisama569.siemalertcorrelationjava.model.SecurityEvent;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -26,7 +28,9 @@ import java.util.concurrent.ConcurrentHashMap;
  *   <li>occurredAt 为空 → {@link RejectReason#MISSING_OCCURRED_AT}</li>
  *   <li>occurredAt 非 ISO-8601 → {@link RejectReason#INVALID_TIMESTAMP}</li>
  *   <li>occurredAt 晚于当前接收时间（未来事件）→ {@link RejectReason#FUTURE_TIMESTAMP}</li>
- *   <li>网络地址字段（{@link #IP_ATTRIBUTE_KEYS}）值非法 → {@link RejectReason#INVALID_FIELD_VALUE}</li>
+ *   <li>网络地址字段（命名风格无关，见 {@link IpFieldMatcher}）值非法
+ *       → {@link RejectReason#INVALID_IP_ADDRESS}；同一记录有多个地址字段非法时，
+ *       按字段名升序在提示中逐一点名，保证每次结果完全一致</li>
  * </ol>
  *
  * <p>全部被拒记录都不会进入去重集合，也不会被静默丢弃；
@@ -39,9 +43,11 @@ public class IngestionService {
     public static final Set<String> DEFAULT_ALLOWED_SOURCES = Set.of(
             "auth-gateway", "firewall", "ids", "edr", "dns-proxy");
 
-    /** 属性中按网络地址校验的字段名。 */
-    public static final Set<String> IP_ATTRIBUTE_KEYS = Set.of(
-            "ip", "srcIp", "dstIp", "sourceIp", "destinationIp");
+    /**
+     * 网络地址字段按其语义识别，与命名风格无关（见 {@link IpFieldMatcher}）：
+     * {@code srcIp}、{@code src_ip}、{@code SRC-IP}、{@code source.ip}、
+     * {@code clientIpAddress} 等写法都会被当作地址字段校验。
+     */
 
     private final Set<String> seenEventIds = ConcurrentHashMap.newKeySet();
     private final Clock clock;
@@ -102,13 +108,19 @@ public class IngestionService {
                     "occurredAt 晚于当前接收时间（未来事件）: " + occurredAt
                             + ", eventId=" + raw.eventId());
         }
-        for (Map.Entry<String, String> attr : raw.attributes().entrySet()) {
-            if (IP_ATTRIBUTE_KEYS.contains(attr.getKey())
-                    && !IpValidator.isValid(attr.getValue())) {
-                return new IngestResult.Rejected(RejectReason.INVALID_FIELD_VALUE,
-                        "字段 " + attr.getKey() + " 不是合法网络地址: " + attr.getValue()
-                                + ", eventId=" + raw.eventId());
+        // 网络地址校验：字段识别与命名风格无关；字段按名升序检查，所有非法字段
+        // 一次性收集到固定顺序的提示里，避免 HashMap 遍历顺序导致点名字段漂移。
+        List<String> invalidIpFields = new ArrayList<>();
+        for (String key : new TreeSet<>(raw.attributes().keySet())) {
+            if (IpFieldMatcher.isIpAddressField(key)
+                    && !IpValidator.isValid(raw.attributes().get(key))) {
+                invalidIpFields.add(key + "=" + raw.attributes().get(key));
             }
+        }
+        if (!invalidIpFields.isEmpty()) {
+            return new IngestResult.Rejected(RejectReason.INVALID_IP_ADDRESS,
+                    "网络地址字段不是合法 IPv4/IPv6: " + String.join(", ", invalidIpFields)
+                            + ", eventId=" + raw.eventId());
         }
 
         // 2. 幂等去重：先占位再返回，保证并发重复提交只放行一次

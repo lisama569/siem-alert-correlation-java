@@ -56,8 +56,10 @@ final class IpValidator {
             head = v;
             tail = "";
         }
-        int headGroups = countGroups(head);
-        int tailGroups = countGroups(tail);
+        // 内嵌 IPv4 只允许出现在整个地址的最末位，因此压缩点之前的 head
+        // 永远不允许出现点分段（如 "1.2.3.4::" 必须判非法）；tail 的最后一段允许。
+        int headGroups = countGroups(head, false);
+        int tailGroups = countGroups(tail, true);
         if (headGroups < 0 || tailGroups < 0) {
             return false;
         }
@@ -68,8 +70,13 @@ final class IpValidator {
         return headGroups == 8;
     }
 
-    /** 返回合法组数；含非法组时返回 -1。最后一组允许是内嵌 IPv4（按 2 组计）。 */
-    private static int countGroups(String s) {
+    /**
+     * 返回合法组数；含非法组时返回 -1。
+     *
+     * @param allowEmbeddedV4 最后一组是否允许是内嵌 IPv4（按 2 组计）。
+     *                        只有压缩点之后（地址最末位）才允许。
+     */
+    private static int countGroups(String s, boolean allowEmbeddedV4) {
         if (s.isEmpty()) {
             return 0;
         }
@@ -81,8 +88,8 @@ final class IpValidator {
                 return -1;
             }
             if (g.contains(".")) {
-                // 内嵌 IPv4 只允许出现在最后一组
-                if (i != groups.length - 1 || !isIpv4(g)) {
+                // 内嵌 IPv4 只允许出现在整个地址的最后一组
+                if (!allowEmbeddedV4 || i != groups.length - 1 || !isIpv4(g)) {
                     return -1;
                 }
                 count += 2;

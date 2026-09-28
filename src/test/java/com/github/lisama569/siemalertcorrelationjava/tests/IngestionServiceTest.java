@@ -94,13 +94,13 @@ class IngestionServiceTest {
     void rejectsInvalidIpAttribute() {
         assertReject(new RawEvent("e1", "firewall", "NETWORK_CONNECTION",
                         "2026-09-24T08:00:00Z", Map.of("srcIp", "999.1.2.3")),
-                RejectReason.INVALID_FIELD_VALUE);
+                RejectReason.INVALID_IP_ADDRESS);
         assertReject(new RawEvent("e2", "firewall", "NETWORK_CONNECTION",
                         "2026-09-24T08:00:00Z", Map.of("dstIp", "not-an-ip")),
-                RejectReason.INVALID_FIELD_VALUE);
+                RejectReason.INVALID_IP_ADDRESS);
         assertReject(new RawEvent("e3", "firewall", "NETWORK_CONNECTION",
                         "2026-09-24T08:00:00Z", Map.of("ip", "10.0.0")),
-                RejectReason.INVALID_FIELD_VALUE);
+                RejectReason.INVALID_IP_ADDRESS);
         // 合法 IPv4 / IPv6 放行
         IngestResult v4 = service.ingest(new RawEvent("e4", "firewall", "NETWORK_CONNECTION",
                 "2026-09-24T08:00:00Z", Map.of("srcIp", "192.168.1.10")));
