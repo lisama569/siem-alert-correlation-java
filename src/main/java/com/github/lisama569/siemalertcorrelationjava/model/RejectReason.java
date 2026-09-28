@@ -10,5 +10,6 @@ public enum RejectReason {
     MISSING_OCCURRED_AT,
     INVALID_TIMESTAMP,
     FUTURE_TIMESTAMP,
-    INVALID_FIELD_VALUE
+    /** 属性值不是合法网络地址（独立于其它字段值错误，可按原因区分）。 */
+    INVALID_IP_ADDRESS
 }

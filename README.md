@@ -57,16 +57,33 @@ SecurityEvent(eventId, source, EventType type, Instant occurredAt,
 6. `occurredAt` 为空 → `MISSING_OCCURRED_AT`
 7. `occurredAt` 不是合法 ISO-8601 → `INVALID_TIMESTAMP`
 8. `occurredAt` 晚于当前接收时间（未来事件）→ `FUTURE_TIMESTAMP`
-9. 网络地址属性（`ip` / `srcIp` / `dstIp` / `sourceIp` / `destinationIp`）
-   的值不是合法 IPv4/IPv6 → `INVALID_FIELD_VALUE`
+9. 网络地址属性的值不是合法 IPv4/IPv6 → `INVALID_IP_ADDRESS`
+   （独立分类，与其它拒绝原因可区分；多个地址字段同时非法时一次性按
+   字段名字典序全部点名）
 
 - **来源白名单**：默认认可 `auth-gateway`、`firewall`、`ids`、`edr`、`dns-proxy`
   （`IngestionService.DEFAULT_ALLOWED_SOURCES`），可通过构造参数覆盖；未被认可的来源
   以独立原因 `UNKNOWN_SOURCE` 拒绝，不会被当成正常事件留下。
 - **未来时间**：判定基准是可注入的 `Clock`（默认系统 UTC 时钟），
   `occurredAt == now` 合法，严格晚于 `now` 才拒绝；便于用固定时钟做确定性测试。
-- **网络地址校验**：只校验上述 5 个属性名；纯本地字面量解析（不做 DNS 查询），
-  IPv4 每段 0-255，IPv6 支持 `::` 压缩与结尾内嵌 IPv4；其他属性名不做地址校验。
+- **网络地址字段识别（命名风格无关）**：属性名先归一化——转小写并剔除
+  `_`、`-` 分隔符——再与规范名集合比较。命中的规范名为
+  `ip`、`srcip`、`dstip`、`sourceip`、`destinationip`
+  （规范常量见 `IngestionService.IP_ATTRIBUTE_KEYS`，识别逻辑见
+  `ingest/AddressFields`）。因此 `srcIp`、`SRCIP`、`src_ip`、
+  `SRC_IP`、`src-ip`、`Src-Ip` 等同义写法都会被当成源地址校验；
+  而 `user`、`hostname`、`srcPort` 等非地址属性归一化后不命中，
+  不会被误伤。识别是纯字面量处理，不做 DNS 查询。
+- **地址字面值口径**：IPv4 点分十进制、每段 0-255；IPv6 支持完整写法、
+  `::` 压缩以及结尾内嵌 IPv4（见 `ingest/IpValidator`）。字段**缺省**
+  （attributes 中没有该键）不触发地址校验，按既有口径放行；字段存在但
+  值为空白/空串属于"地址不合法"，按 `INVALID_IP_ADDRESS` 拒绝
+  （与收紧前 `IpValidator` 的口径一致，没有改变空值处理）。
+- **拒绝结果确定性**：一条记录若有多个非法地址字段，服务会收集全部命中
+  字段并按字段名的 Unicode 字典序排序后写入 `detail`，不依赖 Map 遍历
+  顺序；因此同一条记录重复提交、并发提交，或在服务重启后（全新实例）
+  重新提交，拒绝原因与点名提示都逐字一致、可复现。被拒记录不进入去重
+  集合、不计数、不进入检测，故重复提交不会重复计数或重复告警。
 
 ### 2.2 三态结果
 
@@ -168,6 +185,32 @@ curl -X POST http://localhost:8080/api/events -H 'Content-Type: application/json
 | 重复提交 | **200** | `DUPLICATE` | 幂等返回，不重复计数、不重复告警 |
 | 校验拒绝 | **422** | `REJECTED` | `reason` 为 §6.1 中的具体拒绝原因，`detail` 可读 |
 
+地址收紧的本地手工复现（同一非法地址，换命名风格都会被拒；重复提交提示不变）：
+
+```bash
+# 下划线/连字符/大小写风格 —— 均返回 422, reason=INVALID_IP_ADDRESS
+for k in srcIp src_ip SRC-IP DST_IP; do
+  curl -s -o /dev/null -w "%{http_code} " -X POST http://localhost:8080/api/events \
+    -H 'Content-Type: application/json' \
+    -d "{\"eventId\":\"demo-$k\",\"source\":\"firewall\",\"type\":\"NETWORK_CONNECTION\",
+         \"occurredAt\":\"2026-09-24T08:00:00Z\",\"attributes\":{\"$k\":\"999.1.1.1\"}}"
+done; echo
+
+# 多个地址字段同时非法 —— detail 按字段名字典序点名，重复提交逐字一致
+curl -s -X POST http://localhost:8080/api/events -H 'Content-Type: application/json' -d '{
+  "eventId":"demo-multi","source":"firewall","type":"NETWORK_CONNECTION",
+  "occurredAt":"2026-09-24T08:00:00Z",
+  "attributes":{"src_ip":"bad","dst-ip":"999.1.1.1"}}'
+# -> reason: INVALID_IP_ADDRESS
+# -> detail: 网络地址不合法的字段[dst-ip,src_ip], eventId=demo-multi
+
+# 合法压缩 IPv6 与普通属性照常放行（201 ACCEPTED）
+curl -i -X POST http://localhost:8080/api/events -H 'Content-Type: application/json' -d '{
+  "eventId":"demo-ok","source":"firewall","type":"NETWORK_CONNECTION",
+  "occurredAt":"2026-09-24T08:00:00Z",
+  "attributes":{"src_ip":"2001:db8::1","user":"alice","hostname":"web-01"}}'
+```
+
 ### 5.2 批量提交 `POST /api/events/batch`
 
 请求体是 `RawEvent` 数组。整体返回 **200**，逐条结果在 `items[]` 中区分
@@ -212,7 +255,7 @@ curl -X POST http://localhost:8080/api/events -H 'Content-Type: application/json
 | `MISSING_OCCURRED_AT` | occurredAt 为空 |
 | `INVALID_TIMESTAMP` | occurredAt 不是合法 ISO-8601 |
 | `FUTURE_TIMESTAMP` | occurredAt 晚于当前接收时间（未来事件） |
-| `INVALID_FIELD_VALUE` | 网络地址属性（srcIp 等）不是合法 IPv4/IPv6 |
+| `INVALID_IP_ADDRESS` | 网络地址属性（任意命名风格的 ip/srcIp/dstIp/sourceIp/destinationIp）值不是合法 IPv4/IPv6；多个非法字段按字段名字典序一次性点名，提示可复现 |
 
 ### 6.2 告警跃迁 `TransitionError`
 
@@ -233,16 +276,25 @@ curl -X POST http://localhost:8080/api/events -H 'Content-Type: application/json
 mvn test
 ```
 
-共 22 个用例，全部为本地确定性测试：
+共 28 个用例，全部为本地确定性测试：
 
-- `IngestionServiceTest`（7）：归一化、**8 类可区分拒绝原因**（新增未知来源、
+- `IngestionServiceTest`（7）：归一化、**8 类可区分拒绝原因**（未知来源、
   未来时间、非法地址）、**固定校验顺序的确定性**、合法 IPv4/IPv6 放行、重复提交幂等；
+- `AddressValidationTest`（4，本轮新增）：`srcIp`/`SRCIP`/`src_ip`/`SRC_IP`/
+  `src-ip` 等不同命名风格下的非法地址一律以 `INVALID_IP_ADDRESS` 拒绝；
+  合法 IPv4/IPv6（含 `::` 压缩、内嵌 IPv4）放行；`user`/`hostname`/`srcPort`
+  等普通属性不被误伤；地址字段缺省放行、空串按非法地址拒绝（空值口径不变）；
+  多非法字段按字典序点名、重复/并发/重启重放提示逐字一致、被拒不计数；
+- `BatchAddressIdempotencyTest`（1，本轮新增）：合法 + 3 条命名风格各异的非法
+  地址混合批次重建链路重放 3 轮，受理=6/拒绝=3/告警=1 与拒绝提示逐轮一致；
+  整批重复提交时 6 条全部判重，计数不重不漏、告警不重复；
 - `DetectionEngineTest`（4）：乱序结论一致、超容忍迟到事件被丢弃且有原因、
   重复提交不重复告警、规则变更后历史可复现（既有，不回归）；
 - `AlertServiceTest`（4）：合法生命周期与可追溯历史、非法跃迁/终态/版本冲突的区分拒绝、
   16 线程并发确认+关闭下的状态不变量（既有，不回归）；
-- `ApiControllerTest`（3）：HTTP 受理/重复/拒绝三类区分且拒绝原因可见；
+- `ApiControllerTest`（4）：HTTP 受理/重复/拒绝三类区分且拒绝原因可见；
   查询/确认/版本冲突/关闭/终态/查不到六类结果的状态码与响应体区分；批量混合输入汇总；
+  以及本轮新增的 HTTP 层命名风格无关地址拒绝、多字段提示逐字一致；
 - `CapacityConcurrencyTest`（3）：批量、并发与幂等验收（规模与标准见 §7.3）。
 
 测试日志打印每个用例的**输入、关键判定依据（EVAL / DROP_LATE 等）与最终状态**，
@@ -291,10 +343,20 @@ for i in 1 2 3; do mvn test -Dtest=CapacityConcurrencyTest; done   # 连跑 3 �
   （`IngestionServiceTest` 中一处占位来源 `"s"` 替换为认可来源 `"firewall"`，
   所覆盖的拒绝语义不变）。
 - **收紧（潜在不兼容）**：接入新增 3 类拒绝——来源必须在白名单内、
-  `occurredAt` 不得晚于接收时刻、5 个网络地址属性必须是合法地址；
+  `occurredAt` 不得晚于接收时刻、网络地址属性必须是合法地址；
   原先这些输入会被当作正常事件受理，现在返回 `UNKNOWN_SOURCE` /
-  `FUTURE_TIMESTAMP` / `INVALID_FIELD_VALUE`。白名单可通过构造参数
+  `FUTURE_TIMESTAMP` / `INVALID_IP_ADDRESS`。白名单可通过构造参数
   `new IngestionService(clock, allowedSources)` 调整。
+- **本轮在既有基础上继续收紧地址口径（不推翻上一轮）**：
+  - 地址字段识别从"5 个精确字段名"改为**命名风格无关**：大小写、`_`、`-`
+    风格的同义字段（如 `src_ip`、`SRC-IP`）同样按地址校验，堵住改名绕过；
+  - 拒绝原因由通用的 `INVALID_FIELD_VALUE` 细化为专用的
+    `INVALID_IP_ADDRESS`，与其它字段值/接入错误明确区分；
+  - 一条记录多个地址字段同时非法时，从"撞上哪个报哪个"改为按字段名字典序
+    一次性全部点名，消除 Map 遍历顺序导致的提示漂移，重复/并发/重启重放结果一致。
+  - 地址字段**缺省**的放行口径、空串按非法地址拒绝的口径、被拒记录不计数不进
+    检测的口径均与上一轮一致；告警编号、窗口/水位线、状态机、版本号与多线程
+    计数不变量均未改动。
 - **新增**：本地 HTTP 接口（§5）、`PipelineConfig` Bean 装配、
   批量接入、以及对应自动化测试；均为新增面，不改变既有判定逻辑。
 

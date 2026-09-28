@@ -64,9 +64,41 @@ class ApiControllerTest {
         assertRejected(eventJson("api-e3", "firewall", "LOGIN_FAILED",
                 "2999-01-01T00:00:00Z", "{}"), "FUTURE_TIMESTAMP");
         assertRejected(eventJson("api-e4", "firewall", "NETWORK_CONNECTION",
-                "2026-09-24T08:00:00Z", "{\"srcIp\":\"999.1.1.1\"}"), "INVALID_FIELD_VALUE");
+                "2026-09-24T08:00:00Z", "{\"srcIp\":\"999.1.1.1\"}"), "INVALID_IP_ADDRESS");
         assertRejected(eventJson("api-e5", "firewall", "NOPE",
                 "2026-09-24T08:00:00Z", "{}"), "UNKNOWN_EVENT_TYPE");
+    }
+
+    @Test
+    void rejectsInvalidIpAcrossNamingStylesWithStableDetail() throws Exception {
+        // 换大小写 / 下划线 / 连字符命名，非法地址都必须被拒，
+        // 原因统一为 INVALID_IP_ADDRESS（与其它拒绝原因可区分）
+        for (String key : new String[]{"src_ip", "SRC-IP", "DstIp", "DESTINATION_IP"}) {
+            String id = "api-ip-" + key.replace('_', '-').toLowerCase();
+            assertRejected(eventJson(id, "firewall", "NETWORK_CONNECTION",
+                    "2026-09-24T08:00:00Z",
+                    "{\"" + key + "\":\"999.1.1.1\"}"), "INVALID_IP_ADDRESS");
+        }
+        // 合法地址放行；普通属性（user/hostname）不被误伤
+        mvc.perform(post("/api/events")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(eventJson("api-ip-ok", "firewall", "NETWORK_CONNECTION",
+                                "2026-09-24T08:00:00Z",
+                                "{\"src_ip\":\"2001:db8::1\",\"user\":\"alice\",\"hostname\":\"web-01\"}")))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.result").value("ACCEPTED"));
+        // 同一条多非法字段记录重复提交：点名提示逐字一致（字段按字典序）
+        String multi = eventJson("api-ip-multi", "firewall", "NETWORK_CONNECTION",
+                "2026-09-24T08:00:00Z",
+                "{\"src_ip\":\"bad\",\"dst-ip\":\"999.1.1.1\"}");
+        String expectedDetail = "网络地址不合法的字段[dst-ip,src_ip], eventId=api-ip-multi";
+        for (int i = 0; i < 3; i++) {
+            mvc.perform(post("/api/events")
+                            .contentType(MediaType.APPLICATION_JSON).content(multi))
+                    .andExpect(status().isUnprocessableEntity())
+                    .andExpect(jsonPath("$.reason").value("INVALID_IP_ADDRESS"))
+                    .andExpect(jsonPath("$.detail").value(expectedDetail));
+        }
     }
 
     private void assertRejected(String json, String reason) throws Exception {
